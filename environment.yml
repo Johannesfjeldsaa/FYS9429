@@ -1,0 +1,47 @@
+name: fys9429
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.12
+  - pip
+
+  # --- Core data ---
+  - numpy
+  - pandas
+
+  # --- Climate / earth science ---
+  - xarray
+  - netcdf4
+  - h5netcdf
+  - cftime
+  - nc-time-axis
+  - xesmf           # pulls in esmpy from conda-forge automatically
+
+  # --- Jupyter ---
+  - ipykernel
+
+  # --- Visualisation ---
+  - matplotlib
+  - seaborn
+  - cartopy
+  - cmocean
+
+  # --- Machine learning & statistics ---
+  - statsmodels
+  - scikit-learn
+
+  # --- PyTorch / CUDA ---
+  # Provided by HPC system modules — not installed into conda.
+  # setup_fys9429.py writes module load commands to .envrc and VS Code settings.
+  # Modules: CUDA/12.1.1  PyTorch/2.1.2-foss-2023a-CUDA-12.1.1  torchvision/0.16.0-foss-2023a-CUDA-12.1.1
+
+  # --- Dev tooling ---
+  - pytest
+  - black
+  - flake8
+  - isort
+
+  # --- pip-only packages ---
+  - pip:
+    - "ray[tune]"
