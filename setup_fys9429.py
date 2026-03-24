@@ -4,7 +4,8 @@ FYS9429 Python Environment Setup.
 
 Creates a conda environment with all dependencies for the FYS9429 course,
 including xesmf/esmpy from conda-forge, Ray[tune], and editable installs
-of METEOR (tag v1.6.0) and general_backend.
+of the local FYS9429 package (via pyproject.toml), METEOR (tag v1.6.0),
+and general_backend.
 
 PyTorch, CUDA, cuDNN, and torchvision are NOT installed into the conda
 environment. Instead they are provided by the cluster's HPC module system
@@ -498,6 +499,32 @@ def main() -> int:
 
     _install_repo(conda_cmd, env_name, env_prefix, meteor_dest, label="METEOR")
 
+    # ---- Install local FYS9429 package from pyproject.toml ------------------
+    print("\nInstalling local FYS9429 package (editable from repo root)…")
+    pyproject_path = project_root / "pyproject.toml"
+    if not pyproject_path.exists():
+        print(
+            f"ERROR: pyproject.toml not found at {pyproject_path}",
+            file=sys.stderr,
+        )
+        return 11
+    try:
+        _run_in_env(
+            conda_cmd,
+            env_name,
+            env_prefix,
+            ["python", "-m", "pip", "install", "-e", "."],
+            cwd=project_root,
+        )
+        print("Successfully installed local FYS9429 package (editable).")
+    except subprocess.CalledProcessError:
+        print(
+            "ERROR: editable install from repo root failed. "
+            "Check pyproject.toml and package discovery settings.",
+            file=sys.stderr,
+        )
+        return 12
+
     # ---- Clone and install general_backend -----------------------------------
     backend_dest = src_dir / "general_backend"
     print("\nSetting up general_backend…")
@@ -545,20 +572,27 @@ def main() -> int:
             f"\nRegistering Jupyter kernel '{args.kernel_name}' "
             f"({args.kernel_display})…"
         )
-        _run_in_env(
-            conda_cmd, env_name, env_prefix,
-            ["python", "-m", "pip", "install", "--upgrade", "ipykernel"],
-        )
-        _run_in_env(
-            conda_cmd, env_name, env_prefix,
-            [
-                "python", "-m", "ipykernel", "install",
-                "--user",
-                "--name", args.kernel_name,
-                "--display-name", args.kernel_display,
-            ],
-        )
-        print("Kernel registered.")
+        try:
+            _run_in_env(
+                conda_cmd, env_name, env_prefix,
+                ["python", "-m", "pip", "install", "--upgrade", "ipykernel"],
+            )
+            _run_in_env(
+                conda_cmd, env_name, env_prefix,
+                [
+                    "python", "-m", "ipykernel", "install",
+                    "--user",
+                    "--name", args.kernel_name,
+                    "--display-name", args.kernel_display,
+                ],
+            )
+            print("Kernel registered.")
+        except subprocess.CalledProcessError:
+            print(
+                "WARNING: failed to register ipykernel; setup will continue.\n"
+                "Try running without --register-kernel, then register manually later.",
+                file=sys.stderr,
+            )
 
     # ---- VS Code settings ----------------------------------------------------
     if not args.no_vscode:

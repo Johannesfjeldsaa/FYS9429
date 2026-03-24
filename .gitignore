@@ -212,3 +212,6 @@ __marimo__/
 # METEOR
 src/METEOR/
 *cache/
+
+# general_backend
+src/general_backend/
