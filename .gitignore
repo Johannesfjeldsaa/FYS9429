@@ -209,6 +209,9 @@ __marimo__/
 # Copilot
 .github/
 
+# vscode
+.vscode/  # this will be governed by the setup_fys9429.py script
+
 # METEOR
 src/METEOR/
 *cache/
