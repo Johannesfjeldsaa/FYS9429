@@ -24,7 +24,7 @@ Before running, load Miniforge3 so that 'conda' is on PATH:
 
 Usage:
     python setup_fys9429.py --prefix /path/to/conda/env
-    python setup_fys9429.py --name fys9429 --register-kernel
+    python setup_fys9429.py --name fys9429
     python setup_fys9429.py --prefix /path/to/env --force  # recreate
     python setup_fys9429.py --no-system-modules            # skip module integration
 """
@@ -144,14 +144,15 @@ def _conda_target_args(
 
 
 def _sanitized_env() -> dict[str, str]:
-    """Return os.environ with virtualenv / conda noise removed."""
+    """Return os.environ with virtualenv noise removed, but keep conda vars."""
     run_env = os.environ.copy()
     for key in (
         "PYTHONPATH",
         "PYTHONHOME",
         "VIRTUAL_ENV",
-        "CONDA_PREFIX",
-        "CONDA_DEFAULT_ENV",
+        # DO NOT remove conda environment variables:
+        # "CONDA_PREFIX",
+        # "CONDA_DEFAULT_ENV",
     ):
         run_env.pop(key, None)
     current_path = run_env.get("PATH", "")
@@ -243,27 +244,6 @@ def _get_site_packages(
     if not site_packages:
         raise RuntimeError("Failed to detect site-packages path inside conda env.")
     return site_packages
-
-
-def _ensure_esmf_module_alias(
-    conda_cmd: str,
-    env_name: str | None,
-    env_prefix: Path | None,
-) -> None:
-    """Create an ESMF.py shim so older code that imports ESMF still works."""
-    code = (
-        "import importlib.util, pathlib, site\n"
-        "esmf_spec = importlib.util.find_spec('ESMF')\n"
-        "esmpy_spec = importlib.util.find_spec('esmpy')\n"
-        "if esmf_spec is None and esmpy_spec is not None:\n"
-        "    site_pkgs = [p for p in site.getsitepackages() if 'site-packages' in p]\n"
-        "    target = pathlib.Path(site_pkgs[0]) / 'ESMF.py'\n"
-        "    if not target.exists():\n"
-        "        target.write_text('from esmpy import *\\n')\n"
-        "        print(f'Created ESMF compatibility shim: {target}')\n"
-    )
-    _run_in_env(conda_cmd, env_name, env_prefix, ["python", "-c", code])
-
 
 # ---------------------------------------------------------------------------
 # HPC module system helpers
@@ -380,12 +360,6 @@ def main() -> int:
                         help="Remove and recreate the environment if it already exists")
     parser.add_argument("--no-vscode", action="store_true",
                         help="Skip writing .vscode/settings.json")
-    parser.add_argument("--register-kernel", action="store_true",
-                        help="Register the env as a Jupyter kernel for the current user")
-    parser.add_argument("--kernel-name", default="fys9429",
-                        help="Jupyter kernel name (default: fys9429)")
-    parser.add_argument("--kernel-display", default="FYS9429 (py3.12)",
-                        help="Jupyter kernel display name")
     parser.add_argument("--backend-branch", default="main",
                         help="Branch to check out for general_backend (default: main)")
     parser.add_argument("--conda-cmd", default=None,
@@ -561,38 +535,6 @@ def main() -> int:
     if not env_python.exists():
         print(f"ERROR: python not found at {env_python}", file=sys.stderr)
         return 9
-
-    # ---- ESMF compatibility shim ---------------------------------------------
-    print("\nEnsuring ESMF / esmpy compatibility shim for xesmf…")
-    _ensure_esmf_module_alias(conda_cmd, env_name, env_prefix)
-
-    # ---- Optional: Jupyter kernel registration --------------------------------
-    if args.register_kernel:
-        print(
-            f"\nRegistering Jupyter kernel '{args.kernel_name}' "
-            f"({args.kernel_display})…"
-        )
-        try:
-            _run_in_env(
-                conda_cmd, env_name, env_prefix,
-                ["python", "-m", "pip", "install", "--upgrade", "ipykernel"],
-            )
-            _run_in_env(
-                conda_cmd, env_name, env_prefix,
-                [
-                    "python", "-m", "ipykernel", "install",
-                    "--user",
-                    "--name", args.kernel_name,
-                    "--display-name", args.kernel_display,
-                ],
-            )
-            print("Kernel registered.")
-        except subprocess.CalledProcessError:
-            print(
-                "WARNING: failed to register ipykernel; setup will continue.\n"
-                "Try running without --register-kernel, then register manually later.",
-                file=sys.stderr,
-            )
 
     # ---- VS Code settings ----------------------------------------------------
     if not args.no_vscode:
