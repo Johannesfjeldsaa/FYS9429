@@ -1,0 +1,175 @@
+# Student-t noise model formulation for METEOR
+
+Sources:
+* METEOR noise generator implementation (`src/METEOR/src/meteor/noise_generator.py`)
+* Kotz & Nadarajah (2004), *Multivariate t Distributions and Their Applications*
+* Lange, Little & Taylor (1989), "Robust statistical modeling using the t distribution", JASA
+
+## Background: the standard METEOR noise model
+
+METEOR generates stochastic climate noise by fitting a **PCA + VARX** pipeline to CMIP6 internal variability. The standard model assumes Gaussian innovations throughout.
+
+### 1. Seasonal cycle removal
+
+A linear regression model captures temperature-dependent seasonality at each grid point. Given design matrix $X$ (containing global temperature, $\cos(2\pi m/12)$, $\sin(2\pi m/12)$, and their interactions), the seasonal cycle is
+
+$$
+S(t, \mathbf{s}) = X_t \, \hat{\boldsymbol{\beta}}(\mathbf{s})
+$$
+
+where $\hat{\boldsymbol{\beta}}(\mathbf{s})$ are fitted coefficients at spatial location $\mathbf{s}$.
+
+### 2. PCA dimensionality reduction
+
+The residual anomaly field (after removing the seasonal cycle and optionally a piControl baseline) is compressed via PCA:
+
+$$
+\mathbf{z}_t = W^\top \, \text{vec}(\text{anomaly}_t) \in \mathbb{R}^p
+$$
+
+where $W \in \mathbb{R}^{n_\text{grid} \times p}$ are the leading $p$ eigenvectors (loadings) and $p$ = `n_modes` (default 40). The reconstruction is
+
+$$
+\widehat{\text{anomaly}}_t = W \, \mathbf{z}_t
+$$
+
+### 3. VARX model on PCs
+
+A vector autoregressive model with exogenous inputs (VARX) is fitted to the principal component scores:
+
+$$
+\mathbf{z}_t = \mathbf{c} + A_1 \, \mathbf{z}_{t-1} + A_2 \, \mathbf{z}_{t-2} + B \, \mathbf{x}_t + \boldsymbol{\varepsilon}_t
+$$
+
+where:
+- $\mathbf{c} \in \mathbb{R}^p$ is the intercept
+- $A_i \in \mathbb{R}^{p \times p}$ are lag coefficient matrices (lag order $= 2$ by default)
+- $B \in \mathbb{R}^{p \times q}$ maps exogenous predictors $\mathbf{x}_t$ (e.g.\ global temperature)
+- $\boldsymbol{\varepsilon}_t \sim \mathcal{N}(\mathbf{0}, \Sigma)$ are the innovation shocks
+
+Under the standard model, the innovations are multivariate Gaussian with covariance $\Sigma$ estimated from the fitted residuals.
+
+### 4. Ensemble generation (normal model)
+
+To generate a stochastic realization:
+1. Draw all innovations at once: $\boldsymbol{\varepsilon}_1, \ldots, \boldsymbol{\varepsilon}_T \sim \mathcal{N}(\mathbf{0}, \hat{\Sigma})$
+2. Iterate the VARX recursion to obtain synthetic PCs $\tilde{\mathbf{z}}_t$
+3. Reconstruct the spatial field: $\widetilde{\text{anomaly}}_t = W \tilde{\mathbf{z}}_t$
+4. Add the seasonal cycle back: $\tilde{Y}_t = S(t, \cdot) + \widetilde{\text{anomaly}}_t$
+
+
+## Extension: Student-t distributed output
+
+**In a nutshell idea:** Keep the same PCA-VARX dynamics, but make the stochastic output more dispersive by replacing Gaussian PC marginals with heavier-tailed Student-t marginals through post-hoc scaling.
+
+### Motivation
+
+For temperature, METEOR already explains most variance, but can still be underdispersive in the tails. The goal here is therefore not to change the learned dynamics, but to increase realism of extremes.
+
+Empirical diagnostics from the PC residuals support heavier tails:
+
+- Excess kurtosis mean across PCs: 0.423
+- Maximum excess kurtosis: 1.733 (PC 7)
+- Fitted Student-t df median: 20.9
+- Minimum fitted df: 4.7 (PC 7)
+- Maximum fitted df: 6687639496.0 (PC 8; effectively Gaussian)
+- 12/40 PCs with fitted df < 15
+
+This indicates heterogeneous tail behavior across PCs, which a single Gaussian assumption cannot represent well.
+
+### Why not Student-t innovations inside the VAR loop?
+
+A natural first approach is to replace the Gaussian innovations $\boldsymbol{\varepsilon}_t$ with multivariate Student-t draws. However, the VAR recursion is a **linear filter** applied to the innovations:
+
+$$
+\mathbf{z}_t = \sum_{k=0}^{\infty} \Psi_k \, \boldsymbol{\varepsilon}_{t-k}
+$$
+
+where $\Psi_k$ are the infinite moving-average (VMA) representation matrices. By the **central limit theorem for dependent sequences**, the weighted sum of $t$-distributed innovations converges toward normality as the effective memory increases. In practice, the autoregressive filtering almost completely "gaussianizes" the innovations — the output field shows near-zero excess kurtosis regardless of the input $\nu$.
+
+### Post-hoc chi-squared scaling (implemented approach)
+
+Instead of modifying the innovations, we keep the standard Gaussian VAR loop and apply a **per-PC, per-timestep** stochastic scaling to the output. This exploits the well-known representation of the Student-t distribution as a Gaussian scale mixture.
+
+**Key identity.** If $Z \sim \mathcal{N}(0, 1)$ and $V \sim \chi^2(\nu)$ independently, then
+
+$$
+Y = \sqrt{\frac{\nu}{V}} \cdot Z \sim t_\nu
+$$
+
+follows a Student-t distribution with $\nu$ degrees of freedom.
+
+**Per-PC extension.** Since different PCs may need different tail weights, we allow each PC $j$ to have its own $\nu_j$. The generation procedure becomes:
+
+1. Run the standard Gaussian VARX loop to obtain $\tilde{\mathbf{z}}^{(\text{normal})}_t \in \mathbb{R}^p$
+2. For each PC $j = 1, \ldots, p$ and time step $t = 1, \ldots, T$, draw independently:
+$$
+V_{t,j} \sim \chi^2(\nu_j)
+$$
+3. Scale the output PCs:
+$$
+\tilde{z}_{t,j}^{(t)} = \sqrt{\frac{\nu_j}{V_{t,j}}} \cdot \tilde{z}_{t,j}^{(\text{normal})}
+$$
+
+In matrix form, the scale factor matrix $S \in \mathbb{R}^{T \times p}$ has entries
+
+$$
+S_{t,j} = \sqrt{\frac{\nu_j}{V_{t,j}}}, \qquad V_{t,j} \sim \chi^2(\nu_j)
+$$
+
+and the Student-t output is the element-wise (Hadamard) product:
+
+$$
+\tilde{Z}^{(t)} = S \odot \tilde{Z}^{(\text{normal})}
+$$
+
+**Properties of this construction (implementation-level):**
+- VAR innovations remain Gaussian, so the autoregressive simulation step is unchanged.
+- Heavier tails are introduced in output PCs by post-hoc per-PC scaling.
+- Scaling is applied after the VAR loop, so tail inflation is not filtered away by autoregressive averaging.
+- Different PCs get different tail weights through per-PC $\nu_j$ values.
+
+### Fitting $\nu_j$ via per-PC univariate MLE
+
+The degrees-of-freedom parameters $\nu_1, \ldots, \nu_p$ are estimated from the **VARX residuals** of the normal model. For each PC $j$, we fit a univariate Student-t distribution to the residual time series $\{\hat{\varepsilon}_{t,j}\}_{t=1}^{n}$ by maximum likelihood:
+
+$$
+\hat{\nu}_j = \arg\max_{\nu > 2} \sum_{t=1}^{n} \log f_{t_\nu}\!\left(\hat{\varepsilon}_{t,j}; \nu, \hat{\mu}_j, \hat{\sigma}_j\right)
+$$
+
+where $f_{t_\nu}$ is the univariate Student-t density and $\hat{\mu}_j, \hat{\sigma}_j$ are the jointly estimated location and scale. This is implemented via `scipy.stats.t.fit()`, which performs continuous MLE (not restricted to a discrete candidate grid).
+
+**Empirical results (NorESM2-MM, TAS, 40 PCs):**
+
+| Summary statistic | Value |
+|---|---|
+| Median $\hat{\nu}_j$ | $\approx 21$ |
+| Min $\hat{\nu}_j$ (heaviest tails) | $\approx 4.6$ (PC 7) |
+| Max $\hat{\nu}_j$ (near-Gaussian) | $> 10^9$ (PC 8) |
+| PCs with $\hat{\nu}_j < 15$ | 12 / 40 |
+
+This confirms substantial heterogeneity across PCs: roughly 30% of the variability modes exhibit clearly non-Gaussian tails, while the majority are well-approximated by a Gaussian.
+
+### Configuration options
+
+The `t_df` parameter in `MeteorNoiseGenerator` controls the degrees of freedom:
+
+| `t_df` value | Behaviour |
+|---|---|
+| `None` | Default: $\nu_j = 10$ for all PCs |
+| `float` (e.g. `6.0`) | Uniform: $\nu_j = 6$ for all PCs |
+| `'mle'` | Per-PC MLE: fit univariate $t$ to each PC's residuals |
+
+### Summary: generation pipeline comparison
+
+| Step | Normal model | Student-t model |
+|---|---|---|
+| **1. Seasonal cycle** | Linear regression on $T_\text{glob}$, harmonics | Same |
+| **2. PCA** | $p$ leading modes | Same |
+| **3. VARX innovations** | $\boldsymbol{\varepsilon}_t \sim \mathcal{N}(\mathbf{0}, \Sigma)$ | Same (always Gaussian) |
+| **4. VAR recursion** | $\tilde{\mathbf{z}}_t$ via lag structure | Same |
+| **5. Post-hoc scaling** | None | $\tilde{z}_{t,j} \leftarrow \sqrt{\nu_j / V_{t,j}} \cdot \tilde{z}_{t,j}$, $V_{t,j} \sim \chi^2(\nu_j)$ |
+| **6. Reconstruction** | $W \tilde{\mathbf{z}}_t + S(t, \cdot)$ | Same |
+| **Marginal per PC** | Gaussian | Student-$t(\nu_j)$ |
+| **Temporal correlation** | Exact from VARX simulation | Same VARX simulation, then post-hoc tail scaling |
+| **Tail weight** | Uniform (light) | Per-PC (heterogeneous) |
