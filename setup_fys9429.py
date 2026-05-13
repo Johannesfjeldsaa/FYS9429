@@ -3,17 +3,16 @@
 FYS9429 Python Environment Setup.
 
 Creates a conda environment with all dependencies for the FYS9429 course,
-including xesmf/esmpy from conda-forge, Ray[tune], and editable installs
-of the local FYS9429 package (via pyproject.toml), METEOR (tag v1.6.0),
-and general_backend.
+including xesmf/esmpy from conda-forge, Ray[tune], and
+editable installs of the local FYS9429 package (via pyproject.toml),
+METEOR (main branch), and general_backend.
 
-PyTorch, CUDA, cuDNN, and torchvision are NOT installed into the conda
-environment. Instead they are provided by the cluster's HPC module system
+PyTorch, CUDA, and cuDNN are NOT installed into the conda environment.
+Instead they are provided by the cluster's HPC module system
 (EasyBuild/Lmod) to avoid large downloads and wasted disk quota:
     CUDA/12.1.1
     cuDNN/8.9.2.26-CUDA-12.1.1
     PyTorch/2.1.2-foss-2023a-CUDA-12.1.1
-    torchvision/0.16.0-foss-2023a-CUDA-12.1.1
 
 The script automatically adds 'module load' commands to .envrc (direnv)
 and configures VS Code to open a login shell so the modules are always
@@ -24,7 +23,8 @@ Before running, load Miniforge3 so that 'conda' is on PATH:
 
 Usage:
     python setup_fys9429.py --prefix /path/to/conda/env
-    python setup_fys9429.py --name fys9429 --register-kernel
+    python setup_fys9429.py --name fys9429
+    python setup_fys9429.py --machine victor
     python setup_fys9429.py --prefix /path/to/env --force  # recreate
     python setup_fys9429.py --no-system-modules            # skip module integration
 """
@@ -41,16 +41,29 @@ from pathlib import Path
 
 
 # ---------------------------------------------------------------------------
-# HPC system modules (provided by the cluster, not installed into conda)
+# Per-machine HPC configurations
 # ---------------------------------------------------------------------------
-# Loaded at runtime via 'module load'; kept out of the conda env to
-# avoid downloading large GPU packages unnecessarily.
-_SYSTEM_MODULES: list[str] = [
-    "CUDA/12.1.1",
-    "cuDNN/8.9.2.26-CUDA-12.1.1",
-    "PyTorch/2.1.2-foss-2023a-CUDA-12.1.1",
-    "torchvision/0.16.0-foss-2023a-CUDA-12.1.1",
-]
+# Each machine entry lists the system modules to load at runtime and any
+# notes.  Modules are loaded via 'module load' and kept out of the conda
+# env to avoid large downloads and wasted disk quota.
+
+_MACHINE_CONFIGS: dict[str, dict] = {
+    "victor": {
+        "description": "victor.uio.no — 2×NVIDIA H100 NVL, RHEL 9, Lmod",
+        "system_modules": [
+            "CUDA/12.1.1",
+            "cuDNN/8.9.2.26-CUDA-12.1.1",
+            "PyTorch/2.1.2-foss-2023a-CUDA-12.1.1",
+        ],
+        # Packages not available as system modules on this machine;
+        # installed into the conda env via pip after creation.
+        #"pip_packages": [
+        #    "torchvision",
+        #],
+    },
+}
+
+_DEFAULT_MACHINE = "victor"
 
 
 # ---------------------------------------------------------------------------
@@ -380,12 +393,6 @@ def main() -> int:
                         help="Remove and recreate the environment if it already exists")
     parser.add_argument("--no-vscode", action="store_true",
                         help="Skip writing .vscode/settings.json")
-    parser.add_argument("--register-kernel", action="store_true",
-                        help="Register the env as a Jupyter kernel for the current user")
-    parser.add_argument("--kernel-name", default="fys9429",
-                        help="Jupyter kernel name (default: fys9429)")
-    parser.add_argument("--kernel-display", default="FYS9429 (py3.12)",
-                        help="Jupyter kernel display name")
     parser.add_argument("--backend-branch", default="main",
                         help="Branch to check out for general_backend (default: main)")
     parser.add_argument("--conda-cmd", default=None,
@@ -393,6 +400,11 @@ def main() -> int:
     parser.add_argument("--no-system-modules", action="store_true",
                         help="Skip HPC system module integration (do not add module loads "
                              "to .envrc or VS Code settings)")
+    parser.add_argument("--machine", "-m",
+                        default=_DEFAULT_MACHINE,
+                        choices=list(_MACHINE_CONFIGS),
+                        help=f"Target HPC machine (default: {_DEFAULT_MACHINE}). "
+                             f"Available: {', '.join(_MACHINE_CONFIGS)}")
     args = parser.parse_args()
 
     # ---- Resolve project root ------------------------------------------------
@@ -432,6 +444,10 @@ def main() -> int:
     else:
         print(f"Env name     : {env_name}")
 
+    machine_cfg = _MACHINE_CONFIGS[args.machine]
+    system_modules = machine_cfg["system_modules"]
+    print(f"Machine      : {args.machine} ({machine_cfg['description']})")
+
     use_system_modules = not args.no_system_modules and _modules_available()
     lmod_init = _find_lmod_init() if use_system_modules else None
     if use_system_modules:
@@ -440,7 +456,7 @@ def main() -> int:
         else:
             print("WARNING: Lmod init script not found — module loads will be skipped.")
             use_system_modules = False
-    print(f"System mods  : {'yes (' + ', '.join(_SYSTEM_MODULES) + ')' if use_system_modules else 'disabled / not detected'}")
+    print(f"System mods  : {'yes (' + ', '.join(system_modules) + ')' if use_system_modules else 'disabled / not detected'}")
     print()
 
     # ---- Create / update conda env -------------------------------------------
@@ -475,19 +491,36 @@ def main() -> int:
             ],
         )
 
-    # ---- Clone and install METEOR (tag v1.6.0) -------------------------------
+    # ---- Machine-specific pip packages -------------------------------------
+    pip_packages = machine_cfg.get("pip_packages", [])
+    if pip_packages:
+        print(f"\nInstalling machine-specific pip packages: {', '.join(pip_packages)}")
+        try:
+            _run_in_env(
+                conda_cmd,
+                env_name,
+                env_prefix,
+                ["python", "-m", "pip", "install", *pip_packages],
+            )
+        except subprocess.CalledProcessError:
+            print(
+                "WARNING: failed to install machine-specific pip packages.",
+                file=sys.stderr,
+            )
+
+    # ---- Clone and install METEOR (main branch) ------------------------------
     src_dir = project_root / "src"
     src_dir.mkdir(parents=True, exist_ok=True)
 
     meteor_dest = src_dir / "METEOR"
-    print("\nSetting up METEOR (tag v1.6.0)…")
+    print("\nSetting up METEOR (main branch)…")
     try:
         cloned, used = clone_or_update_repo(
             meteor_dest,
             ssh_url="git@github.com:benmsanderson/METEOR.git",
             https_url="https://github.com/benmsanderson/METEOR.git",
-            ref="v1.6.0",
-            is_tag=True,
+            ref="base",
+            is_tag=False,
         )
         if not cloned:
             print("WARNING: METEOR was not cloned/updated successfully.", file=sys.stderr)
@@ -566,34 +599,6 @@ def main() -> int:
     print("\nEnsuring ESMF / esmpy compatibility shim for xesmf…")
     _ensure_esmf_module_alias(conda_cmd, env_name, env_prefix)
 
-    # ---- Optional: Jupyter kernel registration --------------------------------
-    if args.register_kernel:
-        print(
-            f"\nRegistering Jupyter kernel '{args.kernel_name}' "
-            f"({args.kernel_display})…"
-        )
-        try:
-            _run_in_env(
-                conda_cmd, env_name, env_prefix,
-                ["python", "-m", "pip", "install", "--upgrade", "ipykernel"],
-            )
-            _run_in_env(
-                conda_cmd, env_name, env_prefix,
-                [
-                    "python", "-m", "ipykernel", "install",
-                    "--user",
-                    "--name", args.kernel_name,
-                    "--display-name", args.kernel_display,
-                ],
-            )
-            print("Kernel registered.")
-        except subprocess.CalledProcessError:
-            print(
-                "WARNING: failed to register ipykernel; setup will continue.\n"
-                "Try running without --register-kernel, then register manually later.",
-                file=sys.stderr,
-            )
-
     # ---- VS Code settings ----------------------------------------------------
     if not args.no_vscode:
         vscode_dir = project_root / ".vscode"
@@ -611,7 +616,7 @@ def main() -> int:
                 "${workspaceFolder}/src",
             ],
             "terminal.integrated.env.linux": {
-                "PYTHONPATH": f"{site_packages}:${{workspaceFolder}}/src"
+                "PYTHONPATH": "${workspaceFolder}/src"
             },
         }
         if use_system_modules:
@@ -630,7 +635,7 @@ def main() -> int:
 
     module_block = ""
     if use_system_modules:
-        loads = "\n".join(f"    module load {m}" for m in _SYSTEM_MODULES)
+        loads = "\n".join(f"    module load {m}" for m in system_modules)
         module_block = (
             "\n"
             "# Load HPC system modules for GPU / PyTorch support.\n"
@@ -682,7 +687,7 @@ def main() -> int:
             _run_in_env_with_modules(
                 conda_cmd, env_name, env_prefix,
                 ["python", "-c", torch_check],
-                _SYSTEM_MODULES,
+                system_modules,
                 lmod_init,
             )
         except subprocess.CalledProcessError:

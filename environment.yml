@@ -2,9 +2,12 @@ name: fys9429
 channels:
   - conda-forge
   - defaults
+
 dependencies:
   - python=3.12
-  - pip
+  - pip=24.3.1
+  - setuptools=72.1.0
+  - wheel=0.43.0
 
   # --- Core data ---
   - numpy
@@ -20,6 +23,7 @@ dependencies:
 
   # --- Jupyter ---
   - ipykernel
+  - ipywidgets
 
   # --- Visualisation ---
   - matplotlib
