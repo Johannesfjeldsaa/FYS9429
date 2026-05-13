@@ -1,0 +1,160 @@
+# high level introduction to AutoEncoders (AEs)
+
+Sources (partially copied from)
+* [lecture notes](https://github.com/CompPhysics/AdvancedMachineLearning/blob/main/doc/pub/week10/ipynb/week10.ipynb)
+* [Autoencoders (Bank et al. (2020))](https://arxiv.org/abs/2003.05991)
+
+Autoencoders are artificial neural networks capable of learning efficient representations of the input data (these representations are called codings) without any supervision (i.e., the training set is unlabeled). These codings typically have a much lower dimensionality than the input data, making autoencoders useful for dimensionality reduction.
+
+Autoencoders learn to encode the input data into a lower-dimensional representation, and then decode it back to the original data. The goal of autoencoders is to minimize the reconstruction error, which measures how well the output matches the input. Autoencoders can be seen as a way of learning the latent features or hidden structure of the data, and they can be used for data compression, denoising, anomaly detection, and generative modeling.
+
+There are mulitple different types of Autoencoders, a non-exhausive list includes:
+* Linear Autoencoder
+* Undercomplete Autoencoder
+* Sparse Autoencoder
+* Contractive Autoencoder
+* Denoising Autoencoder
+* Convolutional Autoencoder
+* Variational Autoencoder
+
+The basic architecture of an Auto Encoder is shown bellow, it consists of; an encoder, through which the input data is compressed; a compressed representation refered to as the latent space, where the aim is to have a condensed representation of the data; and a decoder through which the latent features are decompressed into a reconstructed output.
+
+![image.png](attachment:image.png)
+
+Formally the learning ojective is the functions $A: \mathbb{R}^n \to \mathbb{R}^p$ and $B: \mathbb{R}^p \to \mathbb{R}^n$ for the encoder and decoder respectively. These should aim to satisfy
+$$
+\arg \min_{A,B} E[\mathbf{x}, B \circ A(\mathbf{x})],
+$$
+where $E$ is the expectation value of $x$ and $\Delta$ is the reconstruction loss.
+
+### Linear autoencoders
+
+For the case of $A$ and $B$ being linear operators (*linear autoencoder*) the autoencoders latent representations becomes the same as in principal component analysis (PCA).
+
+## Reularization of autoencoders
+
+The most common option is to make the dimension of the representation smaller than the input. This way, a *bottleneck* is imposed. This option also directly serves the goal of getting a low dimensional representation of the data. When autoencoders have **large hidden layers** (equal to or larger than the input), they risk learning the **identity function**—simply copying the input to the output without learning meaningful compressed representations. This defeats the purpose of dimensionality reduction and feature learning. Therefore that bias-variance tradeoff for AEs are that we want good reconstruction (low error) but also a **meaningful, generalized latent representation**.
+
+### sparse autoencoders
+
+Bank et al. (2020) provides two regularization techniques using sparsity:
+
+
+1. *L1 Regularization* - We regularize the **hidden activations** themselves to be sparse (mostly zero) using,
+```math
+\arg \min_{A,B} \mathbb{E}\left[\Delta\left(x, B \circ A(x)\right)\right] + \lambda \sum_{i} |a_i|
+```
+Where:
+- $a_i$ = activation of hidden unit $i$
+- $\lambda$ = regularization strength (tuning parameter)
+- $\Delta$ = reconstruction error (e.g., MSE)
+
+This penalize the sum of absolute activation values. This pushes many activations to become exactly zero.
+
+2.  *Kullback–Leibler (KL) divergence* - each neuron is treated as a Bernoulli random variable with target activation probability $p$ (typically near 0, e.g., $p=0.05$). By penalizing the difference between the target distribution and the actual empirical distribution, $\hat{p}_j = \frac{1}{m} \sum_{i} a_i(x)$, the networks are forced to be regularized. The mimization objective becomes
+
+```math
+\arg \min_{A,B} \mathbb{E}\left[\Delta\left(x, B \circ A(x)\right)\right] + \sum_{j} KL\left(p \| \hat{p}_j\right)
+```
+
+Where:
+- $p$ = target sparsity level (hyperparameter)
+- $\hat{p}_j$ = average activation of neuron $j$ across the batch
+- $KL$ = Kullback-Leibler divergence between Bernoulli distributions
+
+This penalized excessive average neuron *firing rate*.
+
+### Denoising Autoencoders
+
+Denoising autoencoders act as **robust regularizers** by training the network to reconstruct clean inputs from corrupted versions. This prevents overfitting and enables error correction. Thus the training target is no longer exact reconstruction of inputs.
+
+**Corruption strategies:**
+
+1. *Additive Gaussian Noise* - Input is disrupted by white Gaussian noise,
+   ```math
+   C_\sigma(\tilde{x}|x) = \mathcal{N}(x, \sigma^2 I)
+   ```
+   Where:
+   - $\sigma$ = noise variance (controls corruption strength)
+   - $\tilde{x}$ = corrupted input
+   - $x$ = original clean input
+
+2. *Dropout/Erasure* - Random elements are nullified via Bernoulli masking,
+   ```math
+   C_p(\tilde{x}|x) = \beta \cdot x, \quad \beta \sim \text{Ber}(p)
+   ```
+   Where:
+   - $p$ = probability of keeping a value (retention rate)
+   - $\cdot$ = element-wise (Hadamard) product
+   - $\beta$ = binary mask vector
+
+**Effect:** The encoder learns to extract **noise-invariant features** that capture robust semantic structure rather than memorizing pixel-level noise patterns.
+
+### Contractive Autoencoders
+
+While denoising autoencoders resist input perturbations, contractive autoencoders focus on making the **feature extraction itself** less sensitive to small input variations. This is achieved by penalizing the **Jacobian** of the encoder.
+
+**Optimization objective:**
+```math
+\arg \min_{A,B} \mathbb{E}\left[\Delta\left(x, B \circ A(x)\right)\right] + \lambda \|J_A(x)\|_F^2
+```
+
+Where:
+- $J_A(x)$ = Jacobian matrix of the encoder $A$ at input $x$, with elements $J_{ji} = \frac{\partial h_j}{\partial x_i}$ (derivatives of hidden units $h_j$ with respect to inputs $x_i$)
+- $\| \cdot \|_F$ = Frobenius norm (entrywise L2 norm)
+- $\lambda$ = regularization strength
+
+**Effect:** Minimizing the squared Jacobian norm forces the encoder to **disregard input variations that are unimportant for reconstruction**. The latent representations become more similar to each other, creating a locally stable embedding where only task-relevant variations are preserved in the code.
+
+
+# Variational Autoencoders
+
+Bank et al. (2020) describes Variational Autoencoders (VAEs) as **generative probabilistic models** that learn distributions rather than deterministic mappings. The framework treats the encoder as a variational approximation to the intractable true posterior and the decoder as a generative model, enabling sampling of new data points.
+
+**1. Evidence Lower Bound (ELBO) Optimization**
+
+Instead of minimizing reconstruction error directly, VAEs maximize a lower bound on the data log-likelihood. This objective trades off reconstruction accuracy against keeping the latent distribution close to a prior (typically a standard normal):
+
+```math
+\mathcal{L}(\theta, \phi; x_i) = \mathbb{E}_{q_\phi(z|x_i)}[\log p_\theta(x_i|z)] - D_{KL}(q_\phi(z|x_i) \| p_\theta(z))
+```
+
+Where:
+- $\mathbb{E}_{q_\phi}[\log p_\theta(x_i|z)]$ = **Reconstruction term** (expected log-likelihood of data given latent code)
+- $D_{KL}(q_\phi(z|x_i) \| p_\theta(z))$ = **KL divergence** (regularization forcing the learned latent distribution toward the prior $p_\theta(z)$, usually $\mathcal{N}(0, I)$)
+- $q_\phi(z|x)$ = encoder (variational posterior) with parameters $\phi$
+- $p_\theta(x|z)$ = decoder (generative model) with parameters $\theta$
+- $z$ = latent variables
+
+This ensures the latent space is **continuous** and **structuread**—every point sampled from the prior decodes to a plausible output, unlike the potentially discontinuous latent space of standard autoencoders.
+
+**2. The Reparameterization Trick**
+
+To enable gradient descent through the stochastic sampling $z \sim q_\phi(z|x)$, VAEs reparameterize the random variable as a deterministic function of the input and auxiliary noise $\epsilon$:
+
+```math
+z^{(i,l)} = g_\phi(\epsilon^{(i,l)}, x_i)
+```
+
+The ELBO is approximated using $L$ Monte Carlo samples as:
+
+```math
+\mathcal{L}(\theta, \phi; x_i) \approx \frac{1}{L} \sum_{l=1}^L \left[ \log p_\theta(x_i|z^{(i,l)}) - \log q_\phi(z^{(i,l)}|x_i) \right]
+```
+
+Where:
+- $g_\phi$ = differentiable transformation (e.g., $g_\phi(\epsilon, x) = \mu_\phi(x) + \sigma_\phi(x) \odot \epsilon$ for Gaussian encoders)
+- $\epsilon^{(i,l)}$ = random noise drawn from $p(\epsilon)$ (e.g., $\mathcal{N}(0, I)$)
+- $L$ = number of samples (often $L=1$ when using mini-batches)
+
+This outsources the randomness to $\epsilon$, allowing backpropagation to flow through the sampling operation to update $\phi$ and $\theta$ via standard stochastic gradient descent.
+
+**Comparison of Effects**
+
+| Aspect | Standard Autoencoder | Variational Autoencoder |
+|--------|---------------------|-------------------------|
+| **Latent Space** | Deterministic points; arbitrary structure | Probability distributions; continuous and structured by prior |
+| **Generation** | Cannot generate new data (latent space may contain "holes") | Can generate novel samples by sampling $z \sim p(z)$ and decoding |
+| **Regularization** | Requires explicit constraints (L1, L2, contractive, denoising) | Implicit via KL divergence to prior |
+| **Optimization** | Direct reconstruction loss | ELBO = Reconstruction + KL regularization |
+| **Gradients** | Standard backpropagation | Requires reparameterization trick for stochastic nodes |
