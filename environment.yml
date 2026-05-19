@@ -1,16 +1,20 @@
 name: fys9429
+
 channels:
   - conda-forge
   - defaults
 
 dependencies:
   - python=3.12
+
+  # --- Packaging ---
   - pip=24.3.1
   - setuptools=72.1.0
   - wheel=0.43.0
 
-  # --- Core data ---
+  # --- Core scientific stack ---
   - numpy
+  - scipy
   - pandas
 
   # --- Climate / earth science ---
@@ -19,9 +23,11 @@ dependencies:
   - h5netcdf
   - cftime
   - nc-time-axis
-  - xesmf           # pulls in esmpy from conda-forge automatically
+  - xesmf
 
   # --- Jupyter ---
+  - jupyterlab
+  - notebook
   - ipykernel
   - ipywidgets
 
@@ -35,17 +41,20 @@ dependencies:
   - statsmodels
   - scikit-learn
 
-  # --- PyTorch / CUDA ---
-  # Provided by HPC system modules — not installed into conda.
-  # setup_fys9429.py writes module load commands to .envrc and VS Code settings.
-  # Modules: CUDA/12.1.1  PyTorch/2.1.2-foss-2023a-CUDA-12.1.1  torchvision/0.16.0-foss-2023a-CUDA-12.1.1
-
   # --- Dev tooling ---
   - pytest
   - black
   - flake8
   - isort
+  - mypy
 
   # --- pip-only packages ---
   - pip:
-    - "ray[tune]"
+      - "ray[tune]"
+
+      # PyTorch CUDA 12.1 wheels
+      - --extra-index-url https://download.pytorch.org/whl/cu126
+
+      - torch
+      - torchvision
+      - torchaudio

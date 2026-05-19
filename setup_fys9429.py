@@ -7,12 +7,11 @@ including xesmf/esmpy from conda-forge, Ray[tune], and
 editable installs of the local FYS9429 package (via pyproject.toml),
 METEOR (main branch), and general_backend.
 
-PyTorch, CUDA, and cuDNN are NOT installed into the conda environment.
-Instead they are provided by the cluster's HPC module system
-(EasyBuild/Lmod) to avoid large downloads and wasted disk quota:
-    CUDA/12.1.1
-    cuDNN/8.9.2.26-CUDA-12.1.1
-    PyTorch/2.1.2-foss-2023a-CUDA-12.1.1
+PyTorch and CUDA are installed directly into the conda environment
+using the official pytorch + nvidia conda channels.
+
+This avoids Jupyter/kernel issues that commonly occur when mixing
+HPC module systems with conda-based notebook kernels.
 
 The script automatically adds 'module load' commands to .envrc (direnv)
 and configures VS Code to open a login shell so the modules are always
@@ -26,7 +25,6 @@ Usage:
     python setup_fys9429.py --name fys9429
     python setup_fys9429.py --machine victor
     python setup_fys9429.py --prefix /path/to/env --force  # recreate
-    python setup_fys9429.py --no-system-modules            # skip module integration
 """
 from __future__ import annotations
 
@@ -49,17 +47,14 @@ from pathlib import Path
 
 _MACHINE_CONFIGS: dict[str, dict] = {
     "victor": {
-        "description": "victor.uio.no — 2×NVIDIA H100 NVL, RHEL 9, Lmod",
-        "system_modules": [
-            "CUDA/12.1.1",
-            "cuDNN/8.9.2.26-CUDA-12.1.1",
-            "PyTorch/2.1.2-foss-2023a-CUDA-12.1.1",
-        ],
-        # Packages not available as system modules on this machine;
-        # installed into the conda env via pip after creation.
-        #"pip_packages": [
-        #    "torchvision",
-        #],
+        "description": "victor.uio.no — 2×NVIDIA H100 NVL, RHEL 9",
+        "default_prefix": "/scratch/johannlf/.conda/envs/fys9429",
+        # Redirect large downloads and caches to scratch to avoid home quota.
+        "env_vars": {
+            "CONDA_PKGS_DIRS": "/scratch/johannlf/.conda/pkgs",
+            "TMPDIR": "/scratch/johannlf/tmp",
+            "PIP_CACHE_DIR": "/scratch/johannlf/.conda/pip-cache",
+        },
     },
 }
 
@@ -277,65 +272,6 @@ def _ensure_esmf_module_alias(
     )
     _run_in_env(conda_cmd, env_name, env_prefix, ["python", "-c", code])
 
-
-# ---------------------------------------------------------------------------
-# HPC module system helpers
-# ---------------------------------------------------------------------------
-
-def _find_lmod_init() -> str | None:
-    """Return the path to the Lmod bash init script, or None."""
-    # $LMOD_PKG is set by Lmod itself when the module system is initialised.
-    lmod_pkg = os.environ.get("LMOD_PKG")
-    if lmod_pkg:
-        candidate = Path(lmod_pkg) / "init" / "bash"
-        if candidate.exists():
-            return str(candidate)
-    for path in [
-        "/etc/profile.d/lmod.sh",
-        "/usr/share/lmod/lmod/init/bash",
-    ]:
-        if Path(path).exists():
-            return path
-    return None
-
-
-def _modules_available() -> bool:
-    """Return True if the Lmod module system is initialised in this session."""
-    return bool(
-        os.environ.get("LMOD_CMD")
-        or os.environ.get("LMOD_PKG")
-        or shutil.which("modulecmd")
-    )
-
-
-def _run_in_env_with_modules(
-    conda_cmd: str,
-    env_name: str | None,
-    env_prefix: Path | None,
-    command: list[str],
-    modules: list[str],
-    lmod_init: str,
-    *,
-    cwd: Path | None = None,
-) -> subprocess.CompletedProcess[str]:
-    """Run *command* inside the conda env after loading HPC *modules*."""
-    target = _conda_target_args(env_name, env_prefix)
-    conda_run_args = [conda_cmd, "run", *target, *command]
-    module_loads = " && ".join(f"module load {m}" for m in modules)
-    bash_cmd = (
-        f"source {shlex.quote(lmod_init)} 2>/dev/null"
-        f" && {module_loads}"
-        f" && {' '.join(shlex.quote(a) for a in conda_run_args)}"
-    )
-    return subprocess.run(
-        ["bash", "-c", bash_cmd],
-        check=True,
-        text=True,
-        cwd=str(cwd) if cwd else None,
-        env=_sanitized_env(),
-    )
-
-
 # ---------------------------------------------------------------------------
 # Repo-specific install helpers
 # ---------------------------------------------------------------------------
@@ -397,9 +333,6 @@ def main() -> int:
                         help="Branch to check out for general_backend (default: main)")
     parser.add_argument("--conda-cmd", default=None,
                         help="Path to the conda executable (auto-detected if omitted)")
-    parser.add_argument("--no-system-modules", action="store_true",
-                        help="Skip HPC system module integration (do not add module loads "
-                             "to .envrc or VS Code settings)")
     parser.add_argument("--machine", "-m",
                         default=_DEFAULT_MACHINE,
                         choices=list(_MACHINE_CONFIGS),
@@ -416,13 +349,27 @@ def main() -> int:
         print(f"ERROR: environment file not found: {env_file}", file=sys.stderr)
         return 10
 
+    # ---- Resolve machine config -------------------------------------------
+    machine_cfg = _MACHINE_CONFIGS[args.machine]
+
+    # ---- Apply machine-specific environment variables -----------------------
+    for key, val in machine_cfg.get("env_vars", {}).items():
+        os.environ[key] = val
+        Path(val).mkdir(parents=True, exist_ok=True)
+        print(f"Set {key}={val}")
+
     # ---- Resolve env target --------------------------------------------------
     if args.prefix:
         env_prefix = Path(args.prefix).expanduser().resolve()
         env_name = None
     else:
-        env_name = args.name
-        env_prefix = None
+        machine_default_prefix = machine_cfg.get("default_prefix")
+        if machine_default_prefix:
+            env_prefix = Path(machine_default_prefix).expanduser().resolve()
+            env_name = None
+        else:
+            env_name = args.name
+            env_prefix = None
 
     # ---- Find conda ----------------------------------------------------------
     conda_cmd = args.conda_cmd or shutil.which("conda")
@@ -444,20 +391,7 @@ def main() -> int:
     else:
         print(f"Env name     : {env_name}")
 
-    machine_cfg = _MACHINE_CONFIGS[args.machine]
-    system_modules = machine_cfg["system_modules"]
     print(f"Machine      : {args.machine} ({machine_cfg['description']})")
-
-    use_system_modules = not args.no_system_modules and _modules_available()
-    lmod_init = _find_lmod_init() if use_system_modules else None
-    if use_system_modules:
-        if lmod_init:
-            print(f"Lmod init    : {lmod_init}")
-        else:
-            print("WARNING: Lmod init script not found — module loads will be skipped.")
-            use_system_modules = False
-    print(f"System mods  : {'yes (' + ', '.join(system_modules) + ')' if use_system_modules else 'disabled / not detected'}")
-    print()
 
     # ---- Create / update conda env -------------------------------------------
     env_exists = _conda_env_exists(conda_cmd, env_name, env_prefix)
@@ -522,10 +456,17 @@ def main() -> int:
             ref="base",
             is_tag=False,
         )
-        if not cloned:
+        if used == "existing-failed":
+            print(
+                "WARNING: METEOR has local changes — could not update to 'base'. "
+                f"Installing from current state at {meteor_dest}.",
+                file=sys.stderr,
+            )
+        elif not cloned:
             print("WARNING: METEOR was not cloned/updated successfully.", file=sys.stderr)
             return 5
-        print(f"METEOR available at {meteor_dest} (via {used}).")
+        else:
+            print(f"METEOR available at {meteor_dest} (via {used}).")
     except Exception as exc:
         print(f"ERROR: Failed to obtain METEOR: {exc}", file=sys.stderr)
         return 6
@@ -569,10 +510,17 @@ def main() -> int:
             ref=args.backend_branch,
             is_tag=False,
         )
-        if not cloned:
+        if used == "existing-failed":
+            print(
+                "WARNING: general_backend has local changes — could not update. "
+                f"Installing from current state at {backend_dest}.",
+                file=sys.stderr,
+            )
+        elif not cloned:
             print("WARNING: general_backend was not cloned/updated successfully.", file=sys.stderr)
             return 5
-        print(f"general_backend available at {backend_dest} (via {used}).")
+        else:
+            print(f"general_backend available at {backend_dest} (via {used}).")
     except Exception as exc:
         print(f"ERROR: Failed to obtain general_backend: {exc}", file=sys.stderr)
         return 6
@@ -619,30 +567,13 @@ def main() -> int:
                 "PYTHONPATH": "${workspaceFolder}/src"
             },
         }
-        if use_system_modules:
-            # A login shell sources /etc/profile.d/lmod.sh so that
-            # 'module load' commands in .envrc work in the VS Code terminal.
-            settings["terminal.integrated.defaultProfile.linux"] = "bash-login"
-            settings["terminal.integrated.profiles.linux"] = {
-                "bash-login": {"path": "bash", "args": ["-l"]}
-            }
+
         settings_path = vscode_dir / "settings.json"
         settings_path.write_text(json.dumps(settings, indent=2))
         print(f"\nWrote VS Code settings to {settings_path}")
 
     # ---- .envrc for direnv ---------------------------------------------------
     activation_target = str(env_prefix_resolved) if env_prefix else env_name
-
-    module_block = ""
-    if use_system_modules:
-        loads = "\n".join(f"    module load {m}" for m in system_modules)
-        module_block = (
-            "\n"
-            "# Load HPC system modules for GPU / PyTorch support.\n"
-            "if [ -n \"$LMOD_CMD\" ] || command -v module &> /dev/null; then\n"
-            f"{loads}\n"
-            "fi\n"
-        )
 
     envrc_text = (
         "# Auto-activate the FYS9429 conda environment (requires direnv).\n"
@@ -651,7 +582,6 @@ def main() -> int:
         "    eval \"$(conda shell.bash hook)\"\n"
         f"    conda activate {activation_target}\n"
         "fi\n"
-        + module_block
     )
     envrc_path = project_root / ".envrc"
     envrc_path.write_text(envrc_text)
@@ -660,8 +590,11 @@ def main() -> int:
     # ---- Verify imports -------------------------------------------------------
     print("\nVerifying core imports (conda env)…")
     check_code = (
-        "import xarray, numpy, pandas, xesmf, statsmodels, sklearn; "
+        "import xarray, numpy, pandas, xesmf, statsmodels, sklearn, torch; "
         "import sys; "
+        "print(f'torch   {torch.__version__}'); "
+        "print(f'CUDA available: {torch.cuda.is_available()}'); "
+        "print(f'CUDA version: {torch.version.cuda}'); "
         "print(f'Python  {sys.version.split()[0]}'); "
         "print(f'xarray  {xarray.__version__}'); "
         "print(f'numpy   {numpy.__version__}'); "
@@ -675,27 +608,6 @@ def main() -> int:
             "WARNING: core import verification failed — check the output above.",
             file=sys.stderr,
         )
-
-    if use_system_modules and lmod_init:
-        print("Verifying PyTorch import via system modules…")
-        torch_check = (
-            "import torch; "
-            "print(f'torch   {torch.__version__} "
-            "(CUDA available: {torch.cuda.is_available()})')"
-        )
-        try:
-            _run_in_env_with_modules(
-                conda_cmd, env_name, env_prefix,
-                ["python", "-c", torch_check],
-                system_modules,
-                lmod_init,
-            )
-        except subprocess.CalledProcessError:
-            print(
-                "WARNING: PyTorch import via system modules failed.\n"
-                "You may need to run 'module load' manually before using torch.",
-                file=sys.stderr,
-            )
 
     # ---- Done ----------------------------------------------------------------
     if env_prefix is not None:
